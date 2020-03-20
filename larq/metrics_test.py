@@ -5,16 +5,6 @@ import tensorflow as tf
 from larq import metrics
 
 
-def test_scope():
-    assert metrics.get_training_metrics() == set()
-    with metrics.scope(["flip_ratio"]):
-        assert metrics.get_training_metrics() == {"flip_ratio"}
-    assert metrics.get_training_metrics() == set()
-    with pytest.raises(ValueError, match=r".*unknown_metric.*"):
-        with metrics.scope(["flip_ratio", "unknown_metric"]):
-            pass
-
-
 def test_config():
     mcv = metrics.FlipRatio(values_dtype="int16", name="mcv", dtype=tf.float16)
     assert mcv.name == "mcv"
@@ -53,6 +43,13 @@ def test_metric(eager_mode):
     assert 1.5 == mcv.total.numpy()
     assert 3 == mcv.count.numpy()
     assert 1.5 / 2 == mcv.result().numpy()
+
+
+def test_metric_wrong_shape(eager_mode):
+    mcv = metrics.FlipRatio()
+    mcv.build((3,))
+    with pytest.raises((ValueError, tf.errors.InvalidArgumentError)):
+        mcv.update_state(np.array([1, 1]))
 
 
 def test_metric_in_graph_mode(graph_mode):

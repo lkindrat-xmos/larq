@@ -1,26 +1,53 @@
 import logging
 from typing import Optional
 
-from tensorflow import keras
+import tensorflow as tf
 
-from larq import metrics as lq_metrics, quantized_scope, quantizers
+from larq import context, quantizers, utils
 from larq.quantized_variable import QuantizedVariable
 from larq.quantizers import Quantizer
 
 log = logging.getLogger(__name__)
 
 
-# TODO: find a good way remove duplication between QuantizerBase, QuantizerDepthwiseBase and QuantizerSeparableBase
+def _compute_padding(stride, dilation_rate, input_size, filter_size):
+    effective_filter_size = (filter_size - 1) * dilation_rate + 1
+    output_size = (input_size + stride - 1) // stride
+    total_padding = (output_size - 1) * stride + effective_filter_size - input_size
+    total_padding = tf.math.maximum(total_padding, 0)
+    padding = total_padding // 2
+    return padding, padding + (total_padding % 2)
 
 
-class BaseLayer(keras.layers.Layer):
-    """Base class for defining quantized layers"""
+class BaseLayer(tf.keras.layers.Layer):
+    """Base class for defining quantized layers.
 
-    def get_quantizer(self, name) -> Optional[Quantizer]:
+    `input_quantizer` is the element-wise quantization functions to use.
+    If `input_quantizer=None` this layer is equivalent to `tf.keras.layers.Layer`.
+    """
+
+    def __init__(self, *args, input_quantizer=None, **kwargs):
+        self.input_quantizer = quantizers.get(input_quantizer)
+        super().__init__(*args, **kwargs)
+
+    def call(self, inputs):
+        if self.input_quantizer:
+            inputs = self.input_quantizer(inputs)
+        with context.quantized_scope(True):
+            return super().call(inputs)
+
+    def get_config(self):
+        return {
+            **super().get_config(),
+            "input_quantizer": quantizers.serialize(self.input_quantizer),
+        }
+
+    def _get_quantizer(self, name) -> Optional[Quantizer]:
+        """Get quantizer for given kernel name"""
         return None
 
     def _add_variable_with_custom_getter(self, name: str, **kwargs):
-        quantizer = self.get_quantizer(name)
+        quantizer = self._get_quantizer(name)
         if quantizer is None:
             return super()._add_variable_with_custom_getter(name, **kwargs)
 
@@ -33,34 +60,16 @@ class BaseLayer(keras.layers.Layer):
 
         return super()._add_variable_with_custom_getter(name, getter=getter, **kwargs)
 
-    @property
-    def non_trainable_weights(self):
-        weights = super().non_trainable_weights
-        if hasattr(self, "flip_ratio"):
-            return [
-                weight
-                for weight in weights
-                if not any(weight is metric_w for metric_w in self.flip_ratio.weights)
-            ]
-        return weights
-
 
 class QuantizerBase(BaseLayer):
-    """Base class for defining quantized layers
+    """Base class for defining quantized layers with a single kernel.
 
-    `input_quantizer` and `kernel_quantizer` are the element-wise quantization
-    functions to use. If both quantization functions are `None` this layer is
-    equivalent to `Layer`.
+    `kernel_quantizer` is the element-wise quantization functions to use.
+    If `kernel_quantizer=None` this layer is equivalent to `BaseLayer`.
     """
 
-    def __init__(
-        self, *args, input_quantizer=None, kernel_quantizer=None, metrics=None, **kwargs
-    ):
-        self.input_quantizer = quantizers.get(input_quantizer)
-        self.kernel_quantizer = quantizers.get(kernel_quantizer)
-        self._custom_metrics = (
-            metrics if metrics is not None else lq_metrics.get_training_metrics()
-        )
+    def __init__(self, *args, kernel_quantizer=None, **kwargs):
+        self.kernel_quantizer = quantizers.get_kernel_quantizer(kernel_quantizer)
 
         super().__init__(*args, **kwargs)
         if kernel_quantizer and not self.kernel_constraint:
@@ -69,52 +78,96 @@ class QuantizerBase(BaseLayer):
                 "may result in starved weights (where the gradient is always zero)."
             )
 
-    def get_quantizer(self, name: str) -> Optional[Quantizer]:
+    def _get_quantizer(self, name: str) -> Optional[Quantizer]:
         return self.kernel_quantizer if name == "kernel" else None
 
+    def get_config(self):
+        return {
+            **super().get_config(),
+            "kernel_quantizer": quantizers.serialize(self.kernel_quantizer),
+        }
+
+
+class QuantizerBaseConv(tf.keras.layers.Layer):
+    """Base class for defining quantized conv layers"""
+
+    def __init__(self, *args, pad_values=0.0, **kwargs):
+        self.pad_values = pad_values
+        super().__init__(*args, **kwargs)
+
+    def _is_native_padding(self):
+        return self.padding != "same" or (
+            not tf.is_tensor(self.pad_values) and self.pad_values == 0.0
+        )
+
+    def _get_spatial_padding_same(self, shape):
+        return [
+            _compute_padding(stride, dilation_rate, shape[i], filter_size)
+            for i, (stride, dilation_rate, filter_size) in enumerate(
+                zip(self.strides, self.dilation_rate, self.kernel_size)
+            )
+        ]
+
+    def _get_spatial_shape(self, input_shape):
+        return (
+            input_shape[1:-1]
+            if self.data_format == "channels_last"
+            else input_shape[2:]
+        )
+
+    def _get_padding_same(self, inputs):
+        input_shape = tf.shape(inputs)
+        padding = self._get_spatial_padding_same(self._get_spatial_shape(input_shape))
+        return (
+            [[0, 0], *padding, [0, 0]]
+            if self.data_format == "channels_last"
+            else [[0, 0], [0, 0], *padding]
+        )
+
+    def _get_padding_same_shape(self, input_shape):
+        spatial_shape = [
+            (size + stride - 1) // stride if size is not None else None
+            for size, stride in zip(self._get_spatial_shape(input_shape), self.strides)
+        ]
+        if self.data_format == "channels_last":
+            return tf.TensorShape([input_shape[0], *spatial_shape, input_shape[-1]])
+        return tf.TensorShape([*input_shape[:2], *spatial_shape])
+
     def build(self, input_shape):
-        super().build(input_shape)
-        if self.kernel_quantizer:
-            if "flip_ratio" in self._custom_metrics:
-                self.flip_ratio = lq_metrics.FlipRatio(name=f"flip_ratio/{self.name}")
+        if self._is_native_padding():
+            super().build(input_shape)
+        else:
+            with utils.patch_object(self, "padding", "valid"):
+                super().build(self._get_padding_same_shape(input_shape))
 
     def call(self, inputs):
-        if self.input_quantizer:
-            inputs = self.input_quantizer(inputs)
-        with quantized_scope.scope(True):
-            if hasattr(self, "flip_ratio"):
-                self.add_metric(self.flip_ratio(self.kernel))
+        if self._is_native_padding():
+            return super().call(inputs)
+
+        inputs = tf.pad(
+            inputs, self._get_padding_same(inputs), constant_values=self.pad_values
+        )
+        with utils.patch_object(self, "padding", "valid"):
             return super().call(inputs)
 
     def get_config(self):
-        config = {
-            "input_quantizer": quantizers.serialize(self.input_quantizer),
-            "kernel_quantizer": quantizers.serialize(self.kernel_quantizer),
+        return {
+            **super().get_config(),
+            "pad_values": tf.keras.backend.get_value(self.pad_values),
         }
-        return {**super().get_config(), **config}
 
 
 class QuantizerDepthwiseBase(BaseLayer):
-    """Base class for defining quantized layers
+    """Base class for defining depthwise quantized layers
 
-    `input_quantizer` and `depthwise_quantizer` are the element-wise quantization
-    functions to use. If both quantization functions are `None` this layer is
-    equivalent to `Layer`.
+    `depthwise_quantizer` is the element-wise quantization functions to use.
+    If `depthwise_quantizer=None` this layer is equivalent to `BaseLayer`.
     """
 
     def __init__(
-        self,
-        *args,
-        input_quantizer: Optional[Quantizer] = None,
-        depthwise_quantizer: Optional[Quantizer] = None,
-        metrics=None,
-        **kwargs,
+        self, *args, depthwise_quantizer: Optional[Quantizer] = None, **kwargs,
     ):
-        self.input_quantizer = quantizers.get(input_quantizer)
-        self.depthwise_quantizer = quantizers.get(depthwise_quantizer)
-        self._custom_metrics = (
-            metrics if metrics is not None else lq_metrics.get_training_metrics()
-        )
+        self.depthwise_quantizer = quantizers.get_kernel_quantizer(depthwise_quantizer)
 
         super().__init__(*args, **kwargs)
         if depthwise_quantizer and not self.depthwise_constraint:
@@ -123,56 +176,33 @@ class QuantizerDepthwiseBase(BaseLayer):
                 "may result in starved weights (where the gradient is always zero)."
             )
 
-    def get_quantizer(self, name: str) -> Optional[Quantizer]:
+    def _get_quantizer(self, name: str) -> Optional[Quantizer]:
         return self.depthwise_quantizer if name == "depthwise_kernel" else None
 
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self.depthwise_quantizer:
-            if "flip_ratio" in self._custom_metrics:
-                self.flip_ratio = lq_metrics.FlipRatio(name=f"flip_ratio/{self.name}",)
-
-    def call(self, inputs):
-        if self.input_quantizer:
-            inputs = self.input_quantizer(inputs)
-        with quantized_scope.scope(True):
-            if hasattr(self, "flip_ratio"):
-                self.add_metric(self.flip_ratio(self.depthwise_kernel))
-            return super().call(inputs)
-
     def get_config(self):
-        config = {
-            "input_quantizer": quantizers.serialize(self.input_quantizer),
+        return {
+            **super().get_config(),
             "depthwise_quantizer": quantizers.serialize(self.depthwise_quantizer),
         }
-        return {**super().get_config(), **config}
 
 
 class QuantizerSeparableBase(BaseLayer):
-    """Base class for defining separable quantized layers
+    """Base class for defining separable quantized layers.
 
-    `input_quantizer`, `depthwise_quantizer` and `pointwise_quantizer` are the
-    element-wise quantization functions to use. If all quantization functions are `None`
-    this layer is equivalent to `SeparableConv1D`. If `use_bias` is True and
-    a bias initializer is provided, it adds a bias vector to the output.
-    It then optionally applies an activation function to produce the final output.
+    `depthwise_quantizer` and `pointwise_quantizer` are the element-wise quantization
+    functions to use. If all quantization functions are `None` this layer is equivalent
+    to `BaseLayer`.
     """
 
     def __init__(
         self,
         *args,
-        input_quantizer: Optional[Quantizer] = None,
         depthwise_quantizer: Optional[Quantizer] = None,
         pointwise_quantizer: Optional[Quantizer] = None,
-        metrics=None,
         **kwargs,
     ):
-        self.input_quantizer = quantizers.get(input_quantizer)
-        self.depthwise_quantizer = quantizers.get(depthwise_quantizer)
-        self.pointwise_quantizer = quantizers.get(pointwise_quantizer)
-        self._custom_metrics = (
-            metrics if metrics is not None else lq_metrics.get_training_metrics()
-        )
+        self.depthwise_quantizer = quantizers.get_kernel_quantizer(depthwise_quantizer)
+        self.pointwise_quantizer = quantizers.get_kernel_quantizer(pointwise_quantizer)
 
         super().__init__(*args, **kwargs)
         if depthwise_quantizer and not self.depthwise_constraint:
@@ -186,56 +216,16 @@ class QuantizerSeparableBase(BaseLayer):
                 "may result in starved weights (where the gradient is always zero)."
             )
 
-    def get_quantizer(self, name: str) -> Optional[Quantizer]:
+    def _get_quantizer(self, name: str) -> Optional[Quantizer]:
         if name == "depthwise_kernel":
             return self.depthwise_quantizer
         if name == "pointwise_kernel":
             return self.pointwise_quantizer
         return None
 
-    def build(self, input_shape):
-        super().build(input_shape)
-        if self.depthwise_quantizer:
-            if "flip_ratio" in self._custom_metrics:
-                self.depthwise_flip_ratio = lq_metrics.FlipRatio(
-                    name=f"flip_ratio/{self.name}_depthwise",
-                )
-        if self.pointwise_quantizer:
-            if "flip_ratio" in self._custom_metrics:
-                self.pointwise_flip_ratio = lq_metrics.FlipRatio(
-                    name=f"flip_ratio/{self.name}_pointwise",
-                )
-
-    @property
-    def non_trainable_weights(self):
-        weights = super().non_trainable_weights
-        metrics_weights = []
-        if hasattr(self, "depthwise_flip_ratio"):
-            metrics_weights.extend(self.depthwise_flip_ratio.weights)
-        if hasattr(self, "pointwise_flip_ratio"):
-            metrics_weights.extend(self.pointwise_flip_ratio.weights)
-        if metrics_weights:
-            return [
-                weight
-                for weight in weights
-                if not any(weight is metric_w for metric_w in metrics_weights)
-            ]
-        return weights
-
-    def call(self, inputs):
-        if self.input_quantizer:
-            inputs = self.input_quantizer(inputs)
-        with quantized_scope.scope(True):
-            if hasattr(self, "depthwise_flip_ratio"):
-                self.add_metric(self.depthwise_flip_ratio(self.depthwise_kernel))
-            if hasattr(self, "pointwise_flip_ratio"):
-                self.add_metric(self.pointwise_flip_ratio(self.pointwise_kernel))
-            return super().call(inputs)
-
     def get_config(self):
-        config = {
-            "input_quantizer": quantizers.serialize(self.input_quantizer),
+        return {
+            **super().get_config(),
             "depthwise_quantizer": quantizers.serialize(self.depthwise_quantizer),
             "pointwise_quantizer": quantizers.serialize(self.pointwise_quantizer),
         }
-        return {**super().get_config(), **config}

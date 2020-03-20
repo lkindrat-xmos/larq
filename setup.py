@@ -8,7 +8,7 @@ def readme():
 
 setup(
     name="larq",
-    version="0.8.2",
+    version="0.9.2",
     python_requires=">=3.6",
     author="Plumerai",
     author_email="lukas@plumerai.co.uk",
@@ -31,21 +31,12 @@ setup(
             "flake8~=3.7.9",
             "isort~=4.3.21",
             "packaging>=19.2,<21.0",
-            "pytest>=5.2.4,<5.4.0",
+            "pytest>=5.2.4,<5.5.0",
             "pytest-cov~=2.8.1",
             "pytest-xdist>=1.30,<1.32",
-            "pytype>=2020.01.07,<2020.2.0",
+            "pytest-mock~=2.0.0",
+            "pytype>=2020.01.07,<2020.3.0",
             "snapshottest~=0.5.1",
-        ],
-        "docs": [
-            "mkdocs==1.0.4",
-            "mkdocs-material==4.6.0",
-            "pymdown-extensions==6.2.1",
-            "mknotebooks==0.1.7",
-            "mkdocs-minify-plugin==0.2.1",
-            "larq-zoo==0.5.0",
-            "altair==4.0.1",
-            "pandas==1.0.1",
         ],
     },
     classifiers=[

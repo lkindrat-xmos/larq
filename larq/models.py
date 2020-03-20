@@ -3,10 +3,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence, TypeVar, Union
 
 import numpy as np
-from tensorflow import keras
+import tensorflow as tf
 from terminaltables import AsciiTable
 
 import larq.layers as lq_layers
+from larq.utils import memory_as_readable_str
 
 __all__ = ["summary"]
 
@@ -15,14 +16,14 @@ op_count_supported_layer_types = (
     lq_layers.QuantSeparableConv2D,
     lq_layers.QuantDepthwiseConv2D,
     lq_layers.QuantDense,
-    keras.layers.Conv2D,
-    keras.layers.SeparableConv2D,
-    keras.layers.DepthwiseConv2D,
-    keras.layers.Dense,
-    keras.layers.Flatten,
-    keras.layers.BatchNormalization,
-    keras.layers.MaxPool2D,
-    keras.layers.AveragePooling2D,
+    tf.keras.layers.Conv2D,
+    tf.keras.layers.SeparableConv2D,
+    tf.keras.layers.DepthwiseConv2D,
+    tf.keras.layers.Dense,
+    tf.keras.layers.Flatten,
+    tf.keras.layers.BatchNormalization,
+    tf.keras.layers.MaxPool2D,
+    tf.keras.layers.AveragePooling2D,
 )
 
 mac_containing_layers = (
@@ -30,10 +31,10 @@ mac_containing_layers = (
     lq_layers.QuantSeparableConv2D,
     lq_layers.QuantDepthwiseConv2D,
     lq_layers.QuantDense,
-    keras.layers.Conv2D,
-    keras.layers.SeparableConv2D,
-    keras.layers.DepthwiseConv2D,
-    keras.layers.Dense,
+    tf.keras.layers.Conv2D,
+    tf.keras.layers.SeparableConv2D,
+    tf.keras.layers.DepthwiseConv2D,
+    tf.keras.layers.Dense,
 )
 
 
@@ -66,7 +67,7 @@ def _number_as_readable_str(num: float) -> str:
     # For numbers that are at least 1000 trillion (1 quadrillion) format with
     # scientific notation (3 s.f. = 2 d.p. in scientific notation).
     if num >= 1e15:
-        return f"{num:#.2E}"
+        return f"{num:.2E}"
 
     # Count the magnitude.
     magnitude = 0
@@ -74,9 +75,9 @@ def _number_as_readable_str(num: float) -> str:
         magnitude += 1
         num /= 1000.0
 
-    # ':#.3g' formats the number with 3 significant figures, without stripping
-    # trailing zeros.
-    num = f"{num:#.3g}".rstrip(".")
+    # ':.3g' formats the number with 3 significant figures, without stripping trailing
+    # zeros.
+    num = f"{num:.3g}".rstrip(".")
     unit = ["", " k", " M", " B", " T"][magnitude]
     return num + unit
 
@@ -109,6 +110,14 @@ class WeightProfile:
     def fp_equivalent_memory(self) -> int:
         return 32 * self.count
 
+    @property
+    def int8_fp_weights_memory(self) -> int:
+        """Count any 32- or 16-bit weights as 8 bits instead."""
+
+        if self.bitwidth > 8:
+            return self.count * 8
+        return self.bitwidth * self.count
+
     def is_bias(self) -> bool:
         return "bias" in self._weight.name
 
@@ -121,13 +130,22 @@ class OperationProfile:
 
 
 class LayerProfile:
-    def __init__(self, layer: keras.layers.Layer):
+    def __init__(self, layer: tf.keras.layers.Layer):
         self._layer = layer
+
+        weights = layer.weights
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            fused_pairs = [("beta", "moving_mean"), ("gamma", "moving_variance")]
+            for pair in fused_pairs:
+                names = [w.name.split("/")[-1].replace(":0", "") for w in weights]
+                if pair[0] in names and pair[1] in names:
+                    weights.pop(names.index(pair[0]))
+
         self.weight_profiles = [
             WeightProfile(
                 weight, trainable=any(weight is w for w in layer.trainable_weights),
             )
-            for weight in layer.weights
+            for weight in weights
         ]
 
         self.op_profiles = []
@@ -148,6 +166,10 @@ class LayerProfile:
         return sum(p.memory for p in self.weight_profiles)
 
     @property
+    def int8_fp_weights_memory(self) -> int:
+        return sum(p.int8_fp_weights_memory for p in self.weight_profiles)
+
+    @property
     def fp_equivalent_memory(self) -> int:
         return sum(p.fp_equivalent_memory for p in self.weight_profiles)
 
@@ -163,7 +185,7 @@ class LayerProfile:
         return count
 
     def op_count(
-        self, op_type: Optional[str] = None, precision: Optional[int] = None,
+        self, op_type: Optional[str] = None, precision: Optional[int] = None
     ) -> Optional[int]:
         if op_type != "mac":
             raise ValueError("Currently only counting of MAC-operations is supported.")
@@ -220,11 +242,7 @@ class LayerProfile:
     def generate_table_row(
         self, table_config: Mapping[str, Any]
     ) -> Sequence[Union[str, float]]:
-        row = [
-            self._layer.name,
-            self.input_precision or "-",
-            self.output_shape_str,
-        ]
+        row = [self._layer.name, self.input_precision or "-", self.output_shape_str]
         for i in table_config["param_bidtwidths"]:
             n = self.weight_count(i)
             n = _format_table_entry(n, table_config["param_units"])
@@ -239,12 +257,16 @@ class LayerProfile:
 
 
 class ModelProfile(LayerProfile):
-    def __init__(self, model: keras.models.Model):
+    def __init__(self, model: tf.keras.models.Model):
         self.layer_profiles = [LayerProfile(l) for l in model.layers]
 
     @property
     def memory(self) -> int:
         return sum(l.memory for l in self.layer_profiles)
+
+    @property
+    def int8_fp_weights_memory(self) -> int:
+        return sum(l.int8_fp_weights_memory for l in self.layer_profiles)
 
     @property
     def fp_equivalent_memory(self) -> int:
@@ -335,11 +357,12 @@ class ModelProfile(LayerProfile):
                 "Non-trainable params",
                 _number_as_readable_str(self.weight_count(trainable=False)),
             ],
-            ["Model size:", f"{self.memory / (8*1024*1024):.2f} MB"],
+            ["Model size", memory_as_readable_str(self.memory)],
             [
-                "Float-32 Equivalent",
-                f"{self.fp_equivalent_memory / (8*1024*1024):.2f} MB",
+                "Model size (8-bit FP weights)",
+                memory_as_readable_str(self.int8_fp_weights_memory),
             ],
+            ["Float-32 Equivalent", memory_as_readable_str(self.fp_equivalent_memory)],
             [
                 "Compression Ratio of Memory",
                 self.memory / max(1e-8, self.fp_equivalent_memory),
@@ -417,6 +440,7 @@ def summary(
     - total number of trainable weights,
     - total number of non-trainable weights,
     - model size,
+    - model size (8-bit FP weights): memory footprint if FP weights were 8 bit,
     - float-32 equivalent size: memory footprint if all weights were 32 bit,
     - compression ratio achieved by quantizing weights,
     - total number of MAC operations,

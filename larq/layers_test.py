@@ -54,8 +54,8 @@ PARAMS_ALL_LAYERS = [
 ]
 
 PARAMS_SEP_LAYERS = [
-    (lq.layers.QuantSeparableConv1D, tf.keras.layers.SeparableConv1D, (2, 3, 7),),
-    (lq.layers.QuantSeparableConv2D, tf.keras.layers.SeparableConv2D, (2, 3, 7, 6),),
+    (lq.layers.QuantSeparableConv1D, tf.keras.layers.SeparableConv1D, (2, 3, 7)),
+    (lq.layers.QuantSeparableConv2D, tf.keras.layers.SeparableConv2D, (2, 3, 7, 6)),
 ]
 
 
@@ -69,7 +69,7 @@ class TestLayers:
         input_data = testing_utils.random_input(input_shape)
         random_weight = np.random.random() - 0.5
 
-        with lq.metrics.scope(["flip_ratio"]):
+        with lq.context.metrics_scope(["flip_ratio"]):
             quant_output = testing_utils.layer_test(
                 quantized_layer,
                 kwargs=dict(
@@ -104,7 +104,7 @@ class TestLayers:
         random_d_kernel = np.random.random() - 0.5
         random_p_kernel = np.random.random() - 0.5
 
-        with lq.metrics.scope(["flip_ratio"]):
+        with lq.context.metrics_scope(["flip_ratio"]):
             quant_output = testing_utils.layer_test(
                 quantized_layer,
                 kwargs=dict(
@@ -146,7 +146,7 @@ class TestLayers:
         input_data = testing_utils.random_input((2, 3, 7, 6))
         random_weight = np.random.random() - 0.5
 
-        with lq.metrics.scope(["flip_ratio"]):
+        with lq.context.metrics_scope(["flip_ratio"]):
             quant_output = testing_utils.layer_test(
                 lq.layers.QuantDepthwiseConv2D,
                 kwargs=dict(
@@ -172,6 +172,57 @@ class TestLayers:
         )
 
         np.testing.assert_allclose(quant_output, fp_model.predict(np.sign(input_data)))
+
+    @pytest.mark.parametrize(
+        "layer_cls, input_dim",
+        [
+            (lq.layers.QuantConv1D, 3),
+            (lq.layers.QuantConv2D, 4),
+            (lq.layers.QuantConv3D, 5),
+            (lq.layers.QuantSeparableConv1D, 3),
+            (lq.layers.QuantSeparableConv2D, 4),
+            (lq.layers.QuantDepthwiseConv2D, 4),
+        ],
+    )
+    @pytest.mark.parametrize("data_format", ["channels_last", "channels_first"])
+    @pytest.mark.parametrize("dilation", [True, False])
+    def test_non_zero_padding_layers(
+        self, mocker, layer_cls, input_dim, data_format, dilation
+    ):
+        inputs = np.zeros(np.random.randint(5, 20, size=input_dim), np.float32)
+        kernel = tuple(np.random.randint(3, 7, size=input_dim - 2))
+        rand_tuple = tuple(np.random.randint(1, 4, size=input_dim - 2))
+        if not dilation and layer_cls in (
+            lq.layers.QuantSeparableConv2D,
+            lq.layers.QuantDepthwiseConv2D,
+        ):
+            rand_tuple = int(rand_tuple[0])
+        kwargs = {"dilation_rate": rand_tuple} if dilation else {"strides": rand_tuple}
+
+        args = (kernel,) if layer_cls == lq.layers.QuantDepthwiseConv2D else (2, kernel)
+        ref_layer = layer_cls(*args, padding="same", **kwargs)
+        spy = mocker.spy(tf, "pad")
+        layer = layer_cls(*args, padding="same", pad_values=1.0, **kwargs)
+        assert layer(inputs).shape == ref_layer(inputs).shape
+        spy.assert_called_once_with(mocker.ANY, mocker.ANY, constant_values=1.0)
+
+    @pytest.mark.parametrize(
+        "layer_cls, input_shape",
+        [
+            (lq.layers.QuantConv1D, (None, 3)),
+            (lq.layers.QuantConv2D, (None, None, 3)),
+            (lq.layers.QuantConv3D, (None, None, None, 3)),
+            (lq.layers.QuantSeparableConv1D, (None, 3)),
+            (lq.layers.QuantSeparableConv2D, (None, None, 3)),
+            (lq.layers.QuantDepthwiseConv2D, (None, None, 3)),
+        ],
+    )
+    @pytest.mark.parametrize("data_format", ["channels_last", "channels_first"])
+    def test_non_zero_padding_unknown_inputs(self, layer_cls, input_shape, data_format):
+        if data_format == "channels_first":
+            input_shape = reversed(input_shape)
+        input = tf.keras.layers.Input(shape=input_shape)
+        layer_cls(16, 3, padding="same", pad_values=1.0, data_format=data_format)(input)
 
 
 class TestLayerWarns:
@@ -216,34 +267,6 @@ class TestLayerWarns:
         assert caplog.records == []
 
 
-def test_metrics():
-    model = tf.keras.models.Sequential(
-        [lq.layers.QuantDense(3, kernel_quantizer="ste_sign", input_shape=(32,))]
-    )
-    model.compile(loss="mse", optimizer="sgd")
-    assert len(model.layers[0]._metrics) == 0
-
-    with lq.metrics.scope(["flip_ratio"]):
-        model = tf.keras.models.Sequential(
-            [lq.layers.QuantDense(3, kernel_quantizer="ste_sign", input_shape=(32,))]
-        )
-    model.compile(loss="mse", optimizer="sgd")
-    assert len(model.layers[0]._metrics) == 1
-
-    model = tf.keras.models.Sequential(
-        [
-            lq.layers.QuantDense(
-                3,
-                kernel_quantizer="ste_sign",
-                metrics=["flip_ratio"],
-                input_shape=(32,),
-            )
-        ]
-    )
-    model.compile(loss="mse", optimizer="sgd")
-    assert len(model.layers[0]._metrics) == 1
-
-
 @pytest.mark.parametrize(
     "quant_layer,layer",
     [
@@ -270,7 +293,7 @@ def test_layer_kwargs(quant_layer, layer):
         "kernel_quantizer",
         "depthwise_quantizer",
         "pointwise_quantizer",
-        "metrics",
+        "pad_values",
     ):
         try:
             quant_params_list.remove(p)
