@@ -14,7 +14,7 @@ from larq import utils
 @utils.register_alias("flip_ratio")
 @utils.register_keras_custom_object
 class FlipRatio(tf.keras.metrics.Metric):
-    """Computes the mean ration of changed values in a given tensor.
+    """Computes the mean ratio of changed values in a given tensor.
 
     !!! example
         ```python
@@ -26,21 +26,15 @@ class FlipRatio(tf.keras.metrics.Metric):
         ```
 
     # Arguments
-    name: Name of the metric.
-    values_dtype: Data type of the tensor for which to track changes.
-    dtype: Data type of the moving mean.
+        name: Name of the metric.
+        values_dtype: Data type of the tensor for which to track changes.
+        dtype: Data type of the moving mean.
     """
 
     def __init__(self, values_dtype="int8", name="flip_ratio", dtype=None):
         super().__init__(name=name, dtype=dtype)
         self.built = False
         self.values_dtype = tf.as_dtype(values_dtype)
-
-    def __call__(self, inputs, **kwargs):
-        if not self.built:
-            with tf.name_scope(self.name), tf.init_scope():
-                self.build(inputs.shape)
-        return super().__call__(inputs, **kwargs)
 
     def build(self, input_shape):
         self._previous_values = self.add_weight(
@@ -64,10 +58,12 @@ class FlipRatio(tf.keras.metrics.Metric):
         self.built = True
 
     def update_state(self, values, sample_weight=None):
-        if not self.built:
-            self._build(values.shape)
-
         values = tf.cast(values, self.values_dtype)
+
+        if not self.built:
+            with tf.name_scope(self.name), tf.init_scope():
+                self.build(values.shape)
+
         unchanged_values = tf.math.count_nonzero(
             tf.equal(self._previous_values, values)
         )

@@ -10,11 +10,20 @@ from larq.quantizers import Quantizer
 log = logging.getLogger(__name__)
 
 
-def _compute_padding(stride, dilation_rate, input_size, filter_size):
+def _compute_padded_size(stride, dilation_rate, input_size, filter_size):
+    if input_size is None:
+        return None
     effective_filter_size = (filter_size - 1) * dilation_rate + 1
     output_size = (input_size + stride - 1) // stride
-    total_padding = (output_size - 1) * stride + effective_filter_size - input_size
-    total_padding = tf.math.maximum(total_padding, 0)
+    padded_size = (output_size - 1) * stride + effective_filter_size
+    if tf.is_tensor(input_size):
+        return tf.math.maximum(padded_size, input_size)
+    return max(padded_size, input_size)
+
+
+def _compute_padding(stride, dilation_rate, input_size, filter_size):
+    padded_size = _compute_padded_size(stride, dilation_rate, input_size, filter_size)
+    total_padding = padded_size - input_size
     padding = total_padding // 2
     return padding, padding + (total_padding % 2)
 
@@ -94,9 +103,7 @@ class QuantizerBaseConv(tf.keras.layers.Layer):
     def __init__(self, *args, pad_values=0.0, **kwargs):
         self.pad_values = pad_values
         super().__init__(*args, **kwargs)
-
-    def _is_native_padding(self):
-        return self.padding != "same" or (
+        self._is_native_padding = self.padding != "same" or (
             not tf.is_tensor(self.pad_values) and self.pad_values == 0.0
         )
 
@@ -116,7 +123,9 @@ class QuantizerBaseConv(tf.keras.layers.Layer):
         )
 
     def _get_padding_same(self, inputs):
-        input_shape = tf.shape(inputs)
+        input_shape = inputs.shape
+        if not input_shape[1:].is_fully_defined():
+            input_shape = tf.shape(inputs)
         padding = self._get_spatial_padding_same(self._get_spatial_shape(input_shape))
         return (
             [[0, 0], *padding, [0, 0]]
@@ -125,23 +134,26 @@ class QuantizerBaseConv(tf.keras.layers.Layer):
         )
 
     def _get_padding_same_shape(self, input_shape):
+        spatial_input_shape = self._get_spatial_shape(input_shape)
         spatial_shape = [
-            (size + stride - 1) // stride if size is not None else None
-            for size, stride in zip(self._get_spatial_shape(input_shape), self.strides)
+            _compute_padded_size(stride, dilation, size, filter_size)
+            for size, stride, dilation, filter_size in zip(
+                spatial_input_shape, self.strides, self.dilation_rate, self.kernel_size,
+            )
         ]
         if self.data_format == "channels_last":
             return tf.TensorShape([input_shape[0], *spatial_shape, input_shape[-1]])
         return tf.TensorShape([*input_shape[:2], *spatial_shape])
 
     def build(self, input_shape):
-        if self._is_native_padding():
+        if self._is_native_padding:
             super().build(input_shape)
         else:
             with utils.patch_object(self, "padding", "valid"):
                 super().build(self._get_padding_same_shape(input_shape))
 
     def call(self, inputs):
-        if self._is_native_padding():
+        if self._is_native_padding:
             return super().call(inputs)
 
         inputs = tf.pad(

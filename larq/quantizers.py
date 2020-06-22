@@ -52,14 +52,16 @@ import tensorflow as tf
 from larq import context, math, metrics as lq_metrics, utils
 
 __all__ = [
-    "SteSign",
     "ApproxSign",
-    "MagnitudeAwareSign",
-    "SwishSign",
-    "SteTern",
-    "SteHeaviside",
+    "DoReFa",
     "DoReFaQuantizer",
+    "MagnitudeAwareSign",
+    "NoOp",
     "NoOpQuantizer",
+    "SteHeaviside",
+    "SteSign",
+    "SteTern",
+    "SwishSign",
 ]
 
 
@@ -164,9 +166,12 @@ class BaseQuantizer(tf.keras.layers.Layer):
     def non_trainable_weights(self):
         return []
 
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 
 @utils.register_keras_custom_object
-class NoOpQuantizer(BaseQuantizer):
+class NoOp(BaseQuantizer):
     r"""Instantiates a serializable no-op quantizer.
 
     \\[
@@ -181,18 +186,17 @@ class NoOpQuantizer(BaseQuantizer):
     !!! example
         ```python
         layer = lq.layers.QuantDense(
-            16,
-            kernel_quantizer=lq.quantizers.NoOpQuantizer(precision=1),
+            16, kernel_quantizer=lq.quantizers.NoOpQuantizer(precision=1),
         )
         layer.build((32,))
         assert layer.kernel.precision == 1
         ```
 
     # Arguments
-    precision: Set the desired precision of the variable. This can be used to tag
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        precision: Set the desired precision of the variable. This can be used to tag
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
     """
     precision = None
 
@@ -202,6 +206,11 @@ class NoOpQuantizer(BaseQuantizer):
 
     def get_config(self):
         return {**super().get_config(), "precision": self.precision}
+
+
+# `NoOp` used to be called `NoOpQuantizer`; this alias is for
+# backwards-compatibility.
+NoOpQuantizer = NoOp
 
 
 @utils.register_alias("ste_sign")
@@ -229,14 +238,15 @@ class SteSign(BaseQuantizer):
     ```
 
     # Arguments
-    clip_value: Threshold for clipping gradients. If `None` gradients are not clipped.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        clip_value: Threshold for clipping gradients. If `None` gradients are not
+            clipped.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # References
-    - [Binarized Neural Networks: Training Deep Neural Networks with Weights and
-      Activations Constrained to +1 or -1](http://arxiv.org/abs/1602.02830)
+        - [Binarized Neural Networks: Training Deep Neural Networks with Weights and
+            Activations Constrained to +1 or -1](https://arxiv.org/abs/1602.02830)
     """
     precision = 1
 
@@ -275,14 +285,14 @@ class ApproxSign(BaseQuantizer):
     ```
 
     # Arguments
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # References
-    - [Bi-Real Net: Enhancing the Performance of 1-bit CNNs With Improved
-      Representational Capability and Advanced
-      Training Algorithm](http://arxiv.org/abs/1808.00278)
+        - [Bi-Real Net: Enhancing the Performance of 1-bit CNNs With Improved
+            Representational Capability and Advanced Training
+            Algorithm](https://arxiv.org/abs/1808.00278)
     """
     precision = 1
 
@@ -317,13 +327,14 @@ class SteHeaviside(BaseQuantizer):
     ```
 
     # Arguments
-    clip_value: Threshold for clipping gradients. If `None` gradients are not clipped.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        clip_value: Threshold for clipping gradients. If `None` gradients are not
+            clipped.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # Returns
-    AND Binarization function
+        AND Binarization function
     """
     precision = 1
 
@@ -361,16 +372,17 @@ class SwishSign(BaseQuantizer):
     quantizers.SwishSign
     ```
     # Arguments
-    beta: Larger values result in a closer approximation to the derivative of the sign.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        beta: Larger values result in a closer approximation to the derivative of the
+            sign.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # Returns
-    SwishSign quantization function
+        SwishSign quantization function
 
     # References
-    - [BNN+: Improved Binary Network Training](https://arxiv.org/abs/1812.11800)
+        - [BNN+: Improved Binary Network Training](https://arxiv.org/abs/1812.11800)
     """
     precision = 1
 
@@ -399,15 +411,16 @@ class MagnitudeAwareSign(BaseQuantizer):
     ```
 
     # Arguments
-    clip_value: Threshold for clipping gradients. If `None` gradients are not clipped.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        clip_value: Threshold for clipping gradients. If `None` gradients are not
+            clipped.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # References
-    - [Bi-Real Net: Enhancing the Performance of 1-bit CNNs With Improved
-      Representational Capability and Advanced Training
-      Algorithm](https://arxiv.org/abs/1808.00278)
+        - [Bi-Real Net: Enhancing the Performance of 1-bit CNNs With Improved
+        Representational Capability and Advanced Training
+        Algorithm](https://arxiv.org/abs/1808.00278)
 
     """
     precision = 1
@@ -462,16 +475,17 @@ class SteTern(BaseQuantizer):
     ```
 
     # Arguments
-    threshold_value: The value for the threshold, \\(\Delta\\).
-    ternary_weight_networks: Boolean of whether to use the
-        Ternary Weight Networks threshold calculation.
-    clip_value: Threshold for clipping gradients. If `None` gradients are not clipped.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        threshold_value: The value for the threshold, \\(\Delta\\).
+        ternary_weight_networks: Boolean of whether to use the
+            Ternary Weight Networks threshold calculation.
+        clip_value: Threshold for clipping gradients. If `None` gradients are not
+            clipped.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # References
-    - [Ternary Weight Networks](http://arxiv.org/abs/1605.04711)
+        - [Ternary Weight Networks](https://arxiv.org/abs/1605.04711)
     """
 
     precision = 2
@@ -508,7 +522,7 @@ class SteTern(BaseQuantizer):
 
 @utils.register_alias("dorefa_quantizer")
 @utils.register_keras_custom_object
-class DoReFaQuantizer(BaseQuantizer):
+class DoReFa(BaseQuantizer):
     r"""Instantiates a serializable k_bit quantizer as in the DoReFa paper.
 
     \\[
@@ -519,7 +533,8 @@ class DoReFaQuantizer(BaseQuantizer):
     \end{cases}
     \\]
 
-    where \\(n = 2^{\text{k_bit}} - 1\\). The number of bits, k_bit, needs to be passed as an argument.
+    where \\(n = 2^{\text{k_bit}} - 1\\). The number of bits, k_bit, needs to be passed
+    as an argument.
     The gradient is estimated using the Straight-Through Estimator
     (essentially the binarization is replaced by a clipped identity on the
     backward pass).
@@ -528,22 +543,27 @@ class DoReFaQuantizer(BaseQuantizer):
     0 & \text{else}
     \end{cases}\\]
 
+    !!! warning
+       While the DoReFa paper describes how to do quantization for both weights and
+       activations, this implementation is only valid for activations, and this
+       quantizer should therefore not be used as a kernel quantizer.
+
     ```plot-activation
-    quantizers.DoReFaQuantizer
+    quantizers.DoReFa
     ```
 
     # Arguments
-    k_bit: number of bits for the quantization.
-    metrics: An array of metrics to add to the layer. If `None` the metrics set in
-        `larq.context.metrics_scope` are used. Currently only the `flip_ratio` metric is
-        available.
+        k_bit: number of bits for the quantization.
+        metrics: An array of metrics to add to the layer. If `None` the metrics set in
+            `larq.context.metrics_scope` are used. Currently only the `flip_ratio`
+            metric is available.
 
     # Returns
-    Quantization function
+        Quantization function
 
     # References
-    - [DoReFa-Net: Training Low Bitwidth Convolutional Neural Networks
-      with Low Bitwidth Gradients](https://arxiv.org/abs/1606.06160)
+        - [DoReFa-Net: Training Low Bitwidth Convolutional Neural Networks with Low
+            Bitwidth Gradients](https://arxiv.org/abs/1606.06160)
     """
     precision = None
 
@@ -564,6 +584,11 @@ class DoReFaQuantizer(BaseQuantizer):
 
     def get_config(self):
         return {**super().get_config(), "k_bit": self.precision}
+
+
+# `DoReFa` used to be called `DoReFaQuantizer`; this alias is for
+# backwards-compatibility.
+DoReFaQuantizer = DoReFa
 
 
 Quantizer = Union[tf.keras.layers.Layer, Callable[[tf.Tensor], tf.Tensor]]
@@ -600,10 +625,10 @@ def get_kernel_quantizer(identifier):
     """Returns a quantizer from identifier and adds default kernel quantizer metrics.
 
     # Arguments
-    identifier: Function or string
+        identifier: Function or string
 
     # Returns
-    `Quantizer` or `None`
+        `Quantizer` or `None`
     """
     quantizer = get(identifier)
     if isinstance(quantizer, BaseQuantizer) and not quantizer._custom_metrics:

@@ -94,7 +94,7 @@ class TestCaseOptimizer:
                     lq.layers.QuantDense(
                         64,
                         input_quantizer="ste_sign",
-                        kernel_quantizer=lq.quantizers.NoOpQuantizer(precision=1),
+                        kernel_quantizer=lq.quantizers.NoOp(precision=1),
                         activation="relu",
                     ),
                     tf.keras.layers.Dense(10, activation="softmax"),
@@ -145,7 +145,7 @@ class TestCaseOptimizer:
                 lq.layers.QuantDense(
                     64,
                     input_quantizer="ste_sign",
-                    kernel_quantizer=lq.quantizers.NoOpQuantizer(precision=1),
+                    kernel_quantizer=lq.quantizers.NoOp(precision=1),
                     activation="relu",
                 ),
                 tf.keras.layers.Dense(10, activation="softmax"),
@@ -169,7 +169,8 @@ class TestCaseOptimizer:
                 checked_weights += 1
         assert checked_weights == len(opt_weights)
 
-    def test_checkpoint(self, eager_mode, tmp_path):
+    @pytest.mark.usefixtures("eager_mode")
+    def test_checkpoint(self, tmp_path):
         # Build and run a simple model.
         var = tf.Variable([2.0])
         opt = tf.keras.optimizers.SGD(1.0, momentum=1.0)
@@ -212,6 +213,14 @@ class TestBopOptimizer:
             trainable_bn=False,
             target=0,
         )
+
+    def test_mixed_precision(self):
+        opt = lq.optimizers.CaseOptimizer(
+            (lq.optimizers.Bop.is_binary_variable, lq.optimizers.Bop()),
+            default_optimizer=tf.keras.optimizers.Adam(0.01),
+        )
+        opt = tf.keras.mixed_precision.experimental.LossScaleOptimizer(opt, "dynamic")
+        _test_optimizer(opt, test_kernels_are_binary=True)
 
     def test_bop_tf_1_14_schedules(self):
         _test_optimizer(

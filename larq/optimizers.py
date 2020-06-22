@@ -20,7 +20,7 @@ optimizer. A variable may not be claimed by more than one optimizer's predicate.
 
 !!! example
     ```python
-    no_op_quantizer = lq.quantizers.NoOpQuantizer(precision=1)
+    no_op_quantizer = lq.quantizers.NoOp(precision=1)
     layer = lq.layers.QuantDense(16, kernel_quantizer=no_op_quantizer)
 
     case_optimizer = lq.optimizers.CaseOptimizer(
@@ -59,12 +59,15 @@ class CaseOptimizer(tf.keras.optimizers.Optimizer):
     `default_optimizer == None`, the variable is not trained.
 
     # Arguments
-    predicate_optimizer_pairs: One or more `(pred, tf.keras.optimizers.Optimizer)` pairs,
-        where `pred`  takes one `tf.Variable` as argument and returns `True` if the
-        optimizer should be used for that variable, e.g. `pred(var) == True`.
-    default_optimizer: A `tf.keras.optimizers.Optimizer` to be applied to any variable
-        not claimed by any other optimizer. (Must be passed as keyword argument.)
+        predicate_optimizer_pairs: One or more `(pred, tf.keras.optimizers.Optimizer)`
+            pairs, where `pred`  takes one `tf.Variable` as argument and returns `True`
+            if the optimizer should be used for that variable, e.g. `pred(var) == True`.
+        default_optimizer: A `tf.keras.optimizers.Optimizer` to be applied to any
+            variable not claimed by any other optimizer. (Must be passed as keyword
+            argument.)
     """
+
+    _HAS_AGGREGATE_GRAD = True
 
     def __init__(
         self,
@@ -118,7 +121,7 @@ class CaseOptimizer(tf.keras.optimizers.Optimizer):
             weights.extend(optimizer.weights)
         return weights
 
-    def apply_gradients(self, grads_and_vars, name: Optional[str] = None):
+    def apply_gradients(self, grads_and_vars, name: Optional[str] = None, **kwargs):
         """Apply gradients to variables for each optimizer.
 
         On the first call to `apply_gradients()`, compute the mapping from variables to
@@ -137,13 +140,27 @@ class CaseOptimizer(tf.keras.optimizers.Optimizer):
             if var.name in self.var_opt_mapping:
                 grad_var_lists[self.var_opt_mapping[var.name]].append((grad, var))
 
-        # Apply gradients to each optimizer
-        train_ops = [
-            optimizer.apply_gradients(opt_grads_and_vars)
-            for optimizer, opt_grads_and_vars in zip(self.optimizers, grad_var_lists)
-        ]
+        with tf.init_scope():
+            for optimizer, opt_grads_and_vars in zip(self.optimizers, grad_var_lists):
+                optimizer._create_slots([v for (_, v) in grads_and_vars])
 
-        return tf.group(*train_ops, name="train_with_group")
+        return tf.distribute.get_replica_context().merge_call(
+            self._apply_gradients, args=(grad_var_lists, name), kwargs=kwargs
+        )
+
+    def _apply_gradients(self, distribution, grad_var_lists, name, **kwargs):
+        # Apply gradients to each optimizer
+        with tf.name_scope(self._name):
+            train_ops = [
+                distribution.extended.call_for_each_replica(
+                    optimizer.apply_gradients, args=(opt_grads_and_vars,), kwargs=kwargs
+                )
+                for optimizer, opt_grads_and_vars in zip(
+                    self.optimizers, grad_var_lists
+                )
+            ]
+
+            return tf.group(*train_ops, name=name or "train_with_group")
 
     def get_config(self):
         optimizer_configs = [opt.get_config() for (_, opt) in self.pred_opt_pairs]
@@ -238,30 +255,29 @@ class Bop(tf.keras.optimizers.Optimizer):
 
     !!! warning
         The `is_binary_variable` check of this optimizer will only target variables that
-        have been explicitly marked as being binary using `NoOpQuantizer(precision=1)`.
+        have been explicitly marked as being binary using `NoOp(precision=1)`.
 
     !!! example
         ```python
-        no_op_quantizer = lq.quantizers.NoOpQuantizer(precision=1)
+        no_op_quantizer = lq.quantizers.NoOp(precision=1)
         layer = lq.layers.QuantDense(16, kernel_quantizer=no_op_quantizer)
 
         optimizer = lq.optimizers.CaseOptimizer(
-            (
-                lq.optimizers.Bop.is_binary_variable,
-                lq.optimizers.Bop(),
-            ),
+            (lq.optimizers.Bop.is_binary_variable, lq.optimizers.Bop()),
             default_optimizer=tf.keras.optimizers.Adam(0.01),  # for FP weights
         )
         ```
 
     # Arguments
-    threshold: magnitude of average gradient signal required to flip a weight.
-    gamma: the adaptivity rate.
-    name: name of the optimizer.
+        threshold: magnitude of average gradient signal required to flip a weight.
+        gamma: the adaptivity rate.
+        name: name of the optimizer.
 
     # References
-    - [Latent Weights Do Not Exist: Rethinking Binarized Neural Network Optimization](https://papers.nips.cc/paper/8971-latent-weights-do-not-exist-rethinking-binarized-neural-network-optimization)
+        - [Latent Weights Do Not Exist: Rethinking Binarized Neural Network Optimization](https://papers.nips.cc/paper/8971-latent-weights-do-not-exist-rethinking-binarized-neural-network-optimization)
     """
+
+    _HAS_AGGREGATE_GRAD = True
 
     def __init__(
         self, threshold: float = 1e-8, gamma: float = 1e-4, name: str = "Bop", **kwargs
@@ -292,9 +308,6 @@ class Bop(tf.keras.optimizers.Optimizer):
         var_t = lq.math.sign(-tf.sign(var * m_t - threshold) * var)
         return var.assign(var_t).op
 
-    def _resource_apply_sparse(self, grad, var, indices):
-        raise NotImplementedError()
-
     def get_config(self):
         config = {
             "threshold": self._serialize_hyperparameter("threshold"),
@@ -318,6 +331,6 @@ class Bop(tf.keras.optimizers.Optimizer):
         This is an example of a predictate that can be used by the `CaseOptimizer`.
 
         # Arguments
-        var: a `tf.Variable`.
+            var: a `tf.Variable`.
         """
         return getattr(var, "precision", 32) == 1

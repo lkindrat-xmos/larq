@@ -150,7 +150,7 @@ class LayerProfile:
 
         self.op_profiles = []
 
-        if isinstance(layer, mac_containing_layers):
+        if isinstance(layer, mac_containing_layers) and self.output_pixels:
             for p in self.weight_profiles:
                 if not p.is_bias():
                     self.op_profiles.append(
@@ -190,7 +190,10 @@ class LayerProfile:
         if op_type != "mac":
             raise ValueError("Currently only counting of MAC-operations is supported.")
 
-        if isinstance(self._layer, op_count_supported_layer_types):
+        if (
+            isinstance(self._layer, op_count_supported_layer_types)
+            and self.output_pixels
+        ):
             count = 0
             for op in self.op_profiles:
                 if (precision is None or op.precision == precision) and (
@@ -222,14 +225,15 @@ class LayerProfile:
             return "?"
 
     @property
-    def output_pixels(self) -> int:
+    def output_pixels(self) -> Optional[int]:
         """Number of pixels for a single feature map (1 for fully connected layers)."""
+        if not self.output_shape:
+            return None
         if len(self.output_shape) == 4:
             return int(np.prod(self.output_shape[1:3]))
-        elif len(self.output_shape) == 2:
+        if len(self.output_shape) == 2:
             return 1
-        else:
-            raise NotImplementedError()
+        raise NotImplementedError()
 
     @property
     def unique_param_bidtwidths(self) -> Sequence[int]:
@@ -258,40 +262,40 @@ class LayerProfile:
 
 class ModelProfile(LayerProfile):
     def __init__(self, model: tf.keras.models.Model):
-        self.layer_profiles = [LayerProfile(l) for l in model.layers]
+        self.layer_profiles = [LayerProfile(layer) for layer in model.layers]
 
     @property
     def memory(self) -> int:
-        return sum(l.memory for l in self.layer_profiles)
+        return sum(lp.memory for lp in self.layer_profiles)
 
     @property
     def int8_fp_weights_memory(self) -> int:
-        return sum(l.int8_fp_weights_memory for l in self.layer_profiles)
+        return sum(lp.int8_fp_weights_memory for lp in self.layer_profiles)
 
     @property
     def fp_equivalent_memory(self) -> int:
-        return sum(l.fp_equivalent_memory for l in self.layer_profiles)
+        return sum(lp.fp_equivalent_memory for lp in self.layer_profiles)
 
     def weight_count(
         self, bitwidth: Optional[int] = None, trainable: Optional[bool] = None
     ) -> int:
-        return sum(l.weight_count(bitwidth, trainable) for l in self.layer_profiles)
+        return sum(lp.weight_count(bitwidth, trainable) for lp in self.layer_profiles)
 
     def op_count(
         self, op_type: Optional[str] = None, bitwidth: Optional[int] = None
     ) -> int:
-        return sum(l.op_count(op_type, bitwidth) or 0 for l in self.layer_profiles)
+        return sum(lp.op_count(op_type, bitwidth) or 0 for lp in self.layer_profiles)
 
     @property
     def unique_param_bidtwidths(self) -> Sequence[int]:
         return sorted(
-            set(_flatten(l.unique_param_bidtwidths for l in self.layer_profiles))
+            set(_flatten(lp.unique_param_bidtwidths for lp in self.layer_profiles))
         )
 
     @property
     def unique_op_precisions(self) -> Sequence[int]:
         return sorted(
-            set(_flatten(l.unique_op_precisions for l in self.layer_profiles))
+            set(_flatten(lp.unique_op_precisions for lp in self.layer_profiles))
         )
 
     def _generate_table_header(self, table_config: Mapping[str, Any]) -> Sequence[str]:
@@ -419,7 +423,9 @@ class SummaryTable(AsciiTable):
 
 
 def summary(
-    model, print_fn: Callable[[str], Any] = print, include_macs: bool = True
+    model: tf.keras.models.Model,
+    print_fn: Callable[[str], Any] = None,
+    include_macs: bool = True,
 ) -> None:
     """Prints a string summary of the network.
 
@@ -447,13 +453,14 @@ def summary(
     - ratio of MAC operations that is binarized and can be accelated with XNOR-gates.
 
     # Arguments
-    model: `tf.keras` model instance.
-    print_fn: Print function to use. Defaults to `print`. You can set it to a custom
-        function in order to capture the string summary.
-    include_macs: whether or not to include the number of MAC-operations in the summary.
+        model: model instance.
+        print_fn: Print function to use. Defaults to `print`. You can set it to a custom
+            function in order to capture the string summary.
+        include_macs: whether or not to include the number of MAC-operations in the
+            summary.
 
     # Raises
-    ValueError: if called before the model is built.
+        ValueError: if called before the model is built.
     """
 
     if not model.built:
@@ -462,6 +469,9 @@ def summary(
             "`model.build()` or calling `model.fit()` with some data, or specify an "
             "`input_shape` argument in the first layer(s) for automatic build."
         )
+
+    if not print_fn:
+        print_fn = print
 
     model_profile = ModelProfile(model)
     print_fn(

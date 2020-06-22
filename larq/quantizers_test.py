@@ -53,12 +53,12 @@ class TestCommonFunctionality:
         assert type(fn.precision) == int
 
     def test_noop_serialization(self):
-        fn = lq.quantizers.get(lq.quantizers.NoOpQuantizer(precision=1))
-        assert fn.__class__ == lq.quantizers.NoOpQuantizer
+        fn = lq.quantizers.get(lq.quantizers.NoOp(precision=1))
+        assert fn.__class__ == lq.quantizers.NoOp
         assert fn.precision == 1
         config = lq.quantizers.serialize(fn)
         fn = lq.quantizers.deserialize(config)
-        assert fn.__class__ == lq.quantizers.NoOpQuantizer
+        assert fn.__class__ == lq.quantizers.NoOp
         assert fn.precision == 1
 
     def test_invalid_usage(self):
@@ -127,7 +127,8 @@ class TestQuantization:
         assert np.all(result[real_values <= 0] == 0)
         assert np.all(result[real_values > 0] == 1)
 
-    def test_magnitude_aware_sign_binarization(self, eager_mode):
+    @pytest.mark.usefixtures("eager_mode")
+    def test_magnitude_aware_sign_binarization(self):
         a = np.random.uniform(-2, 2, (3, 2, 2, 3))
         x = tf.Variable(a)
         y = lq.quantizers.MagnitudeAwareSign()(x)
@@ -217,7 +218,7 @@ class TestQuantization:
 
     def test_dorefa_quantize(self):
         x = tf.keras.backend.placeholder(ndim=2)
-        f = tf.keras.backend.function([x], [lq.quantizers.DoReFaQuantizer(2)(x)])
+        f = tf.keras.backend.function([x], [lq.quantizers.DoReFa(2)(x)])
         real_values = testing_utils.generate_real_values_with_zeros()
         result = f([real_values])[0]
         k_bit = 2
@@ -234,6 +235,7 @@ class TestQuantization:
             )
 
 
+@pytest.mark.usefixtures("eager_mode")
 class TestGradients:
     """Test gradients for different quantizers."""
 
@@ -245,7 +247,7 @@ class TestGradients:
             lq.quantizers.SteHeaviside(clip_value=None),
         ],
     )
-    def test_identity_ste_grad(self, eager_mode, fn):
+    def test_identity_ste_grad(self, fn):
         x = testing_utils.generate_real_values_with_zeros(shape=(8, 3, 3, 16))
         tf_x = tf.Variable(x)
         with tf.GradientTape() as tape:
@@ -261,7 +263,7 @@ class TestGradients:
             lq.quantizers.SteHeaviside(),
         ],
     )
-    def test_ste_grad(self, eager_mode, fn):
+    def test_ste_grad(self, fn):
         @np.vectorize
         def ste_grad(x):
             if np.abs(x) <= 1:
@@ -276,7 +278,7 @@ class TestGradients:
         np.testing.assert_allclose(grad.numpy(), ste_grad(x))
 
     # Test with and without default threshold
-    def test_swish_grad(self, eager_mode):
+    def test_swish_grad(self):
         def swish_grad(x, beta):
             return (
                 beta * (2 - beta * x * np.tanh(beta * x / 2)) / (1 + np.cosh(beta * x))
@@ -294,7 +296,7 @@ class TestGradients:
         grad = tape.gradient(activation, tf_x)
         np.testing.assert_allclose(grad.numpy(), swish_grad(x, beta=10.0))
 
-    def test_approx_sign_grad(self, eager_mode):
+    def test_approx_sign_grad(self):
         @np.vectorize
         def approx_sign_grad(x):
             if np.abs(x) <= 1:
@@ -308,7 +310,7 @@ class TestGradients:
         grad = tape.gradient(activation, tf_x)
         np.testing.assert_allclose(grad.numpy(), approx_sign_grad(x))
 
-    def test_magnitude_aware_sign_grad(self, eager_mode):
+    def test_magnitude_aware_sign_grad(self):
         a = np.random.uniform(-2, 2, (3, 2, 2, 3))
         x = tf.Variable(a)
         with tf.GradientTape() as tape:
@@ -323,7 +325,7 @@ class TestGradients:
             grad.numpy(), np.where(abs(a) < 1, np.ones(a.shape) * scale_vector, 0)
         )
 
-    def test_dorefa_ste_grad(self, eager_mode):
+    def test_dorefa_ste_grad(self):
         @np.vectorize
         def ste_grad(x):
             if x <= 1 and x >= 0:
@@ -333,7 +335,7 @@ class TestGradients:
         x = testing_utils.generate_real_values_with_zeros(shape=(8, 3, 3, 16))
         tf_x = tf.Variable(x)
         with tf.GradientTape() as tape:
-            activation = lq.quantizers.DoReFaQuantizer(2)(tf_x)
+            activation = lq.quantizers.DoReFa(2)(tf_x)
         grad = tape.gradient(activation, tf_x)
         np.testing.assert_allclose(grad.numpy(), ste_grad(x))
 
@@ -347,7 +349,7 @@ class TestGradients:
         ("swish_sign", lq.quantizers.SwishSign),
         ("magnitude_aware_sign", lq.quantizers.MagnitudeAwareSign),
         ("ste_tern", lq.quantizers.SteTern),
-        ("dorefa_quantizer", lq.quantizers.DoReFaQuantizer),
+        ("dorefa_quantizer", lq.quantizers.DoReFa),
     ],
 )
 def test_metrics(quantizer):
@@ -406,3 +408,8 @@ def test_get_kernel_quantizer_accepts_function():
     custom_quantizer = lq.quantizers.get_kernel_quantizer(lambda x: x)
     assert callable(custom_quantizer)
     assert not hasattr(custom_quantizer, "_custom_metrics")
+
+
+def test_backwards_compat_aliases():
+    assert lq.quantizers.DoReFaQuantizer == lq.quantizers.DoReFa
+    assert lq.quantizers.NoOpQuantizer == lq.quantizers.NoOp

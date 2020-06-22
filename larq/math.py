@@ -8,7 +8,7 @@ def sign(x):
     \\[
     f(x) = \begin{cases}
       -1 & x < 0 \\\
-      1 & x \geq 0
+      \hphantom{-}1 & x \geq 0
     \end{cases}
     \\]
 
@@ -17,10 +17,10 @@ def sign(x):
     return a binary value and will never be zero.
 
     # Arguments
-    `x`: Input Tensor
+        `x`: Input Tensor
 
     # Returns
-    A Tensor with same type as `x`.
+        A Tensor with same type as `x`.
     """
     return tf.sign(tf.sign(x) + 0.1)
 
@@ -31,14 +31,14 @@ def heaviside(x):
     \\[
     q(x) = \begin{cases}
     +1 & x > 0 \\\
-    0 & x \leq 0
+    \hphantom{+}0 & x \leq 0
     \end{cases}
     \\]
 
     # Arguments
-    `x`: Input Tensor
+        `x`: Input Tensor
 
     # Returns
-    A Tensor with same type as `x`.
+        A Tensor with same type as `x`.
     """
     return tf.sign(tf.nn.relu(x))
